@@ -7,5 +7,6 @@ test-results/
 .env
 .env.local
 .env.*.local
+.runtime/
 *.log
 .DS_Store

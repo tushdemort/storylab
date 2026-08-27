@@ -16,6 +16,7 @@ type AdminAttempt = {
   participantId: string;
   codeStatus: string;
   stage: string;
+  collaborationPhase: string | null;
   pairSessionId: string | null;
   startedAt: string;
   completedAt: string | null;
@@ -107,7 +108,7 @@ export function AdminApp() {
         {tab === "overview" && <Overview state={state} />}
         {tab === "ids" && <ParticipantIds state={state} refresh={refresh} setError={setError} />}
         {tab === "participants" && <Participants state={state} refresh={refresh} setError={setError} />}
-        {tab === "content" && <ContentEditor config={state.config} refresh={refresh} setError={setError} />}
+        {tab === "content" && <PhaseContentEditor config={state.config} refresh={refresh} setError={setError} />}
         {tab === "dashboard" && <AdminDataDashboard />}
         {tab === "data" && <DataExport config={state.config} />}
       </main>
@@ -182,24 +183,75 @@ function Participants({ state, refresh, setError }: { state: AdminState; refresh
 }
 
 function AttemptTable({ attempts, onReset }: { attempts: AdminAttempt[]; onReset?: (attempt: AdminAttempt) => void }) {
-  return <div className="table-wrap"><table><thead><tr><th>Participant ID</th><th>Stage</th><th>Started</th><th>Last seen</th>{onReset && <th />}</tr></thead><tbody>{attempts.map((attempt) => <tr key={attempt.id}><td><strong>{attempt.participantId}</strong></td><td><span className={`status-pill ${attempt.stage}`}>{attempt.stage}</span></td><td>{new Date(attempt.startedAt).toLocaleString()}</td><td>{new Date(attempt.lastSeenAt).toLocaleString()}</td>{onReset && <td><button className="table-action" onClick={() => onReset(attempt)}><RefreshCw size={14} />Reset ID</button></td>}</tr>)}{!attempts.length && <tr><td colSpan={onReset ? 5 : 4} className="empty-cell">No attempts yet.</td></tr>}</tbody></table></div>;
+  return <div className="table-wrap"><table><thead><tr><th>Participant ID</th><th>Stage</th><th>Started</th><th>Last seen</th>{onReset && <th />}</tr></thead><tbody>{attempts.map((attempt) => { const stage = attempt.collaborationPhase ?? attempt.stage; return <tr key={attempt.id}><td><strong>{attempt.participantId}</strong></td><td><span className={`status-pill ${stage}`}>{stage}</span></td><td>{new Date(attempt.startedAt).toLocaleString()}</td><td>{new Date(attempt.lastSeenAt).toLocaleString()}</td>{onReset && <td><button className="table-action" onClick={() => onReset(attempt)}><RefreshCw size={14} />Reset ID</button></td>}</tr>; })}{!attempts.length && <tr><td colSpan={onReset ? 5 : 4} className="empty-cell">No attempts yet.</td></tr>}</tbody></table></div>;
 }
 
-function ContentEditor({ config, refresh, setError }: { config: StudyConfig; refresh: () => Promise<void>; setError: (value: string) => void }) {
+const phaseEditorFields = [
+  { key: "ideation", label: "1. Ideation", instruction: "ideationInstructionMarkdown", prompt: "ideationPrompt", seconds: "ideationSeconds", detail: "Private work; the participant is not told that a match already exists." },
+  { key: "discussion", label: "2. Discussion", instruction: "discussionInstructionMarkdown", prompt: "discussionPrompt", seconds: "discussionSeconds", detail: "Partner aliases and persistent chat become visible." },
+  { key: "outline", label: "3. Outline", instruction: "outlineInstructionMarkdown", prompt: "outlinePrompt", seconds: "outlineSeconds", detail: "Chat remains open while both participants type simultaneously in one live shared outline." },
+  { key: "writing", label: "4. Final writing", instruction: "writingInstructionMarkdown", prompt: "writingPrompt", seconds: "writingSeconds", detail: "Either participant can propose a final story after the minimum time." },
+] as const;
+
+function PhaseContentEditor({ config, refresh, setError }: { config: StudyConfig; refresh: () => Promise<void>; setError: (value: string) => void }) {
   const [form, setForm] = useState(config);
   const [quizJson, setQuizJson] = useState(() => JSON.stringify(config.quizQuestions, null, 2));
-  const [busy, setBusy] = useState(false); const [success, setSuccess] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [success, setSuccess] = useState("");
   const update = (key: keyof StudyConfig, value: string | number) => setForm((current) => ({ ...current, [key]: value }));
   const publish = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError(""); setSuccess("");
     try {
       const quizQuestions = JSON.parse(quizJson);
-      await requestJson("/api/admin/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, quizQuestions }) });
-      setSuccess("A new study version was published. Existing attempts remain on their original version."); await refresh();
+      await requestJson("/api/admin/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          instructionMarkdown: form.discussionInstructionMarkdown,
+          chatSeconds: form.discussionSeconds,
+          quizQuestions,
+        }),
+      });
+      setSuccess("A new four-phase study version was published. Existing attempts remain on their original version.");
+      await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Publishing failed."); }
     finally { setBusy(false); }
   };
-  return <form onSubmit={publish}><Card className="form-card"><div className="section-heading"><div><span className="card-kicker">Versioned settings</span><h2>Participant-facing content</h2><p>Publishing creates a new immutable version for future attempts.</p></div></div><label className="field-label">Consent text (Markdown)</label><textarea className="admin-textarea" rows={6} value={form.consentMarkdown} onChange={(event) => update("consentMarkdown", event.target.value)} required /><label className="field-label">Mandatory keystroke disclosure</label><textarea className="admin-textarea" rows={5} value={form.keystrokeDisclosure} onChange={(event) => update("keystrokeDisclosure", event.target.value)} required /><label className="field-label">Attention prompt</label><textarea className="admin-textarea" rows={3} value={form.attentionPrompt} onChange={(event) => update("attentionPrompt", event.target.value)} required /><label className="field-label">Instruction card (Markdown)</label><textarea className="admin-textarea" rows={5} value={form.instructionMarkdown} onChange={(event) => update("instructionMarkdown", event.target.value)} required /></Card><Card className="form-card"><div className="section-heading"><div><span className="card-kicker">Timing and quiz</span><h2>Session rules</h2></div></div><div className="number-grid"><label>Waiting room (seconds)<input type="number" min={10} max={3600} value={form.waitSeconds} onChange={(event) => update("waitSeconds", Number(event.target.value))} /></label><label>Chat duration (seconds)<input type="number" min={10} max={14400} value={form.chatSeconds} onChange={(event) => update("chatSeconds", Number(event.target.value))} /></label><label>Reconnect grace (seconds)<input type="number" min={30} max={3600} value={form.reconnectSeconds} onChange={(event) => update("reconnectSeconds", Number(event.target.value))} /></label></div><label className="field-label">Multiple-choice questions (JSON)</label><textarea className="admin-textarea code-input" rows={18} value={quizJson} onChange={(event) => setQuizJson(event.target.value)} spellCheck={false} />{success && <div className="success-note">{success}</div>}<Button type="submit" disabled={busy}><Save size={17} />{busy ? "Publishing…" : "Publish new version"}</Button></Card></form>;
+
+  return <form onSubmit={publish} className="phase-editor">
+    <Card className="form-card">
+      <div className="section-heading"><div><span className="card-kicker">Versioned settings</span><h2>Consent and entry</h2><p>Publishing applies these settings only to new attempts.</p></div></div>
+      <label className="field-label">Consent text (Markdown)</label>
+      <textarea className="admin-textarea" rows={6} value={form.consentMarkdown} onChange={(event) => update("consentMarkdown", event.target.value)} required />
+      <label className="field-label">Mandatory keystroke disclosure</label>
+      <textarea className="admin-textarea" rows={5} value={form.keystrokeDisclosure} onChange={(event) => update("keystrokeDisclosure", event.target.value)} required />
+      <label className="field-label">Attention prompt</label>
+      <textarea className="admin-textarea" rows={3} value={form.attentionPrompt} onChange={(event) => update("attentionPrompt", event.target.value)} required />
+    </Card>
+    <div className="phase-editor-grid">
+      {phaseEditorFields.map((phase) => <Card className="form-card phase-config-card" key={phase.key}>
+        <span className="card-kicker">{phase.label}</span>
+        <p>{phase.detail}</p>
+        <label className="field-label">Instructions (Markdown)</label>
+        <textarea className="admin-textarea" rows={5} value={String(form[phase.instruction])} onChange={(event) => update(phase.instruction, event.target.value)} required />
+        <label className="field-label">Writing prompt</label>
+        <textarea className="admin-textarea" rows={3} value={String(form[phase.prompt])} onChange={(event) => update(phase.prompt, event.target.value)} required />
+        <label className="field-label">Minimum time (seconds)</label>
+        <input type="number" min={10} max={14400} value={Number(form[phase.seconds])} onChange={(event) => update(phase.seconds, Number(event.target.value))} required />
+      </Card>)}
+    </div>
+    <Card className="form-card">
+      <div className="section-heading"><div><span className="card-kicker">Session rules</span><h2>Matchmaking and final survey</h2></div></div>
+      <div className="number-grid">
+        <label>Waiting room (seconds)<input type="number" min={10} max={3600} value={form.waitSeconds} onChange={(event) => update("waitSeconds", Number(event.target.value))} /></label>
+        <label>Reconnect grace (seconds)<input type="number" min={30} max={3600} value={form.reconnectSeconds} onChange={(event) => update("reconnectSeconds", Number(event.target.value))} /></label>
+      </div>
+      <label className="field-label">Multiple-choice questions (JSON)</label>
+      <textarea className="admin-textarea code-input" rows={18} value={quizJson} onChange={(event) => setQuizJson(event.target.value)} spellCheck={false} />
+      {success && <div className="success-note">{success}</div>}
+      <Button type="submit" disabled={busy}><Save size={17} />{busy ? "Publishing…" : "Publish new version"}</Button>
+    </Card>
+  </form>;
 }
 
 function DataExport({ config }: { config: StudyConfig }) {
@@ -209,7 +261,7 @@ function DataExport({ config }: { config: StudyConfig }) {
     if (status) params.set("status", status); if (from) params.set("from", from); if (to) params.set("to", to);
     return `/api/admin/export?${params}`;
   }, [from, status, to]);
-  return <><Card><span className="card-kicker">Research dataset</span><h2>Download a filtered ZIP</h2><p>The archive contains separate CSV files for attempts, pairs, chat, raw keystrokes, story decisions, quiz responses, and integrity incidents.</p><div className="filter-grid"><label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{["attention","waiting","instruction","chat","finalizing","quiz","complete","aborted"].map((value) => <option key={value}>{value}</option>)}</select></label><label>From date<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To date<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div><a className="button download-button" href={url}><Download size={17} />Download data</a></Card><Card className="danger-zone"><div><span className="card-kicker">Retention</span><h2>Manual deletion</h2><p>Data is retained until a researcher deletes a complete pair. Deletion removes both participants’ messages, stories, quizzes, integrity records, and keystrokes.</p></div><PairDeletion version={config.version} /></Card></>;
+  return <><Card><span className="card-kicker">Research dataset</span><h2>Download a filtered ZIP</h2><p>The archive contains separate CSV files for attempts, phases, private ideation drafts, live outline operations and snapshots, chat, raw keystrokes, story decisions, survey responses, and integrity incidents.</p><div className="filter-grid"><label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{["attention","waiting","instruction","chat","finalizing","quiz","complete","aborted"].map((value) => <option key={value}>{value}</option>)}</select></label><label>From date<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To date<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div><a className="button download-button" href={url}><Download size={17} />Download data</a></Card><Card className="danger-zone"><div><span className="card-kicker">Retention</span><h2>Manual deletion</h2><p>Data is retained until a researcher deletes a complete pair. Deletion removes both participants’ messages, stories, quizzes, integrity records, and keystrokes.</p></div><PairDeletion version={config.version} /></Card></>;
 }
 
 function PairDeletion({ version }: { version: number }) {

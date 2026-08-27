@@ -11,7 +11,7 @@ export async function GET() {
     const supabase = createAdminClient();
     const { data, error } = await supabase
       .from("study_versions")
-      .select("id,version,consent_markdown,keystroke_disclosure,attention_prompt,instruction_markdown,wait_seconds,chat_seconds,reconnect_seconds,quiz_questions")
+      .select("id,version,consent_markdown,keystroke_disclosure,attention_prompt,instruction_markdown,ideation_instruction_markdown,ideation_prompt,discussion_instruction_markdown,discussion_prompt,outline_instruction_markdown,outline_prompt,writing_instruction_markdown,writing_prompt,wait_seconds,chat_seconds,ideation_seconds,discussion_seconds,outline_seconds,writing_seconds,reconnect_seconds,quiz_questions")
       .eq("status", "active")
       .single();
     if (error) throw error;

@@ -12,13 +12,13 @@ export async function GET(request: NextRequest) {
     const supabase = auth.scoped.client;
     const [configResult, attemptsResult, pairsResult, queueResult, codesResult] = await Promise.all([
       supabase.from("study_versions")
-        .select("id,version,consent_markdown,keystroke_disclosure,attention_prompt,instruction_markdown,wait_seconds,chat_seconds,reconnect_seconds,quiz_questions")
+        .select("id,version,consent_markdown,keystroke_disclosure,attention_prompt,instruction_markdown,ideation_instruction_markdown,ideation_prompt,discussion_instruction_markdown,discussion_prompt,outline_instruction_markdown,outline_prompt,writing_instruction_markdown,writing_prompt,wait_seconds,chat_seconds,ideation_seconds,discussion_seconds,outline_seconds,writing_seconds,reconnect_seconds,quiz_questions")
         .eq("status", "active").single(),
       supabase.from("attempts")
         .select("id,participant_code_id,stage,pair_session_id,started_at,completed_at,last_seen_at")
         .order("started_at", { ascending: false }).limit(500),
       supabase.from("pair_sessions")
-        .select("id,status,paired_at,chat_ends_at,completed_at,aborted_at")
+        .select("id,status,phase,paired_at,phase_ends_at,chat_ends_at,completed_at,aborted_at")
         .order("paired_at", { ascending: false }).limit(250),
       supabase.from("queue_entries").select("attempt_id,status,expires_at"),
       supabase.rpc("admin_codes_for_export"),
@@ -28,11 +28,13 @@ export async function GET(request: NextRequest) {
     }
     const codes = (codesResult.data ?? []) as Array<Record<string, unknown>>;
     const codeById = new Map(codes.map((code) => [String(code.id), code]));
+    const phaseByPairId = new Map((pairsResult.data ?? []).map((pair) => [String(pair.id), String(pair.phase)]));
     if (!configResult.data) throw new Error("No active study configuration was found.");
     const attempts: Array<Record<string, unknown>> = (attemptsResult.data ?? []).map((row) => ({
       ...camelizeRow<Record<string, unknown>>(row),
       participantId: codeById.get(row.participant_code_id)?.code_display ?? "Unavailable",
       codeStatus: codeById.get(row.participant_code_id)?.status ?? "unknown",
+      collaborationPhase: row.pair_session_id ? phaseByPairId.get(String(row.pair_session_id)) ?? null : null,
     }));
     const counts = attempts.reduce<Record<string, number>>((acc, attempt) => {
       const stage = String(attempt.stage);

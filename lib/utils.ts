@@ -8,6 +8,12 @@ export function secondsRemaining(deadline: string | null, now = Date.now()): num
   return Math.max(0, Math.ceil((new Date(deadline).getTime() - now) / 1000));
 }
 
+export function secondsRemainingAfter(startedAt: string | null, durationSeconds: number, now = Date.now()): number {
+  if (!startedAt) return 0;
+  const deadline = new Date(startedAt).getTime() + durationSeconds * 1000;
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+
 export function formatClock(totalSeconds: number): string {
   const minutes = Math.floor(Math.max(0, totalSeconds) / 60);
   const seconds = Math.max(0, totalSeconds) % 60;

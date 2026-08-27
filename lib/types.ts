@@ -10,6 +10,7 @@ export type AttemptStage =
 
 export type QuizOption = { value: string; label: string };
 export type QuizQuestion = { id: string; prompt: string; options: QuizOption[] };
+export type CollaborationPhase = "ideation" | "discussion" | "outline" | "writing";
 
 export type StudyConfig = {
   id: string;
@@ -18,8 +19,20 @@ export type StudyConfig = {
   keystrokeDisclosure: string;
   attentionPrompt: string;
   instructionMarkdown: string;
+  ideationInstructionMarkdown: string;
+  ideationPrompt: string;
+  discussionInstructionMarkdown: string;
+  discussionPrompt: string;
+  outlineInstructionMarkdown: string;
+  outlinePrompt: string;
+  writingInstructionMarkdown: string;
+  writingPrompt: string;
   waitSeconds: number;
   chatSeconds: number;
+  ideationSeconds: number;
+  discussionSeconds: number;
+  outlineSeconds: number;
+  writingSeconds: number;
   reconnectSeconds: number;
   quizQuestions: QuizQuestion[];
 };
@@ -54,9 +67,23 @@ export type PairState = {
   pairedAt: string;
   chatStartedAt: string | null;
   chatEndsAt: string | null;
+  phase: CollaborationPhase;
+  phaseStartedAt: string;
+  phaseEndsAt: string | null;
+  sharedOutline: string;
+  sharedOutlineUpdatedAt: string | null;
+  sharedOutlineUpdatedBy: string | null;
+  disconnectedAttemptId: string | null;
+  disconnectDetectedAt: string | null;
   finalStory: string | null;
   members: PairMember[];
 } | null;
+
+export type PhaseApproval = {
+  phase: Exclude<CollaborationPhase, "writing">;
+  attemptId: string;
+  decidedAt: string;
+};
 
 export type ChatMessage = {
   id: string;
@@ -64,6 +91,25 @@ export type ChatMessage = {
   clientMessageId: string;
   fieldInstanceId: string;
   body: string;
+  createdAt: string;
+};
+
+export type OutlineInsertRun = {
+  id: string;
+  afterId: string | null;
+  text: string;
+};
+
+export type OutlineOperation = {
+  id: string;
+  insertRuns: OutlineInsertRun[];
+  deleteIds: string[];
+};
+
+export type OutlineOperationBatch = {
+  clientBatchId: string;
+  senderAttemptId: string;
+  operations: OutlineOperation[];
   createdAt: string;
 };
 
@@ -90,6 +136,9 @@ export type ParticipantState = {
   queue: QueueState;
   pair: PairState;
   messages: ChatMessage[];
+  outlineOperationBatches: OutlineOperationBatch[];
+  phaseApprovals: PhaseApproval[];
+  ideationDraft: string;
   proposal: StoryProposal;
   quizResponses: Record<string, string>;
   serverNow: string;

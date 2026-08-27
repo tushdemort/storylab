@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countWords, formatClock, secondsRemaining } from "@/lib/utils";
+import { countWords, formatClock, secondsRemaining, secondsRemainingAfter } from "@/lib/utils";
 
 describe("assessment utilities", () => {
   it("counts whitespace-separated words", () => {
@@ -11,5 +11,11 @@ describe("assessment utilities", () => {
     expect(secondsRemaining("2026-01-01T00:00:10.001Z", Date.parse("2026-01-01T00:00:00Z"))).toBe(11);
     expect(secondsRemaining("2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:01Z"))).toBe(0);
     expect(formatClock(125)).toBe("02:05");
+  });
+
+  it("calculates the full reconnect grace period from server detection time", () => {
+    const detectedAt = "2026-01-01T00:00:00Z";
+    expect(secondsRemainingAfter(detectedAt, 120, Date.parse("2026-01-01T00:00:30Z"))).toBe(90);
+    expect(secondsRemainingAfter(detectedAt, 120, Date.parse("2026-01-01T00:02:01Z"))).toBe(0);
   });
 });

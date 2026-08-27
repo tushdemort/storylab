@@ -13,6 +13,10 @@ const datasets = {
   queue: { table: "queue_entries", order: "joined_at" },
   members: { table: "pair_members", order: "ready_at" },
   messages: { table: "messages", order: "created_at" },
+  ideationDrafts: { table: "ideation_drafts", order: "updated_at" },
+  phaseApprovals: { table: "pair_phase_approvals", order: "decided_at" },
+  outlineOperations: { table: "outline_operation_batches", order: "id" },
+  outlineRevisions: { table: "outline_revisions", order: "created_at" },
   proposals: { table: "story_proposals", order: "created_at" },
   approvals: { table: "story_approvals", order: "decided_at" },
   quizzes: { table: "quiz_responses", order: "submitted_at" },
@@ -34,6 +38,8 @@ function attemptReference(dataset: Dataset, row: Row): string | null {
   if (dataset === "attempts") return String(row.id);
   if (dataset === "messages") return String(row.sender_attempt_id);
   if (dataset === "proposals") return String(row.proposer_attempt_id);
+  if (dataset === "outlineOperations") return String(row.sender_attempt_id);
+  if (dataset === "outlineRevisions") return String(row.editor_attempt_id);
   if ("attempt_id" in row && row.attempt_id) return String(row.attempt_id);
   return null;
 }
@@ -101,6 +107,118 @@ async function datasetCounts() {
   return Object.fromEntries(entries) as Record<Dataset, number>;
 }
 
+async function allSelectedRows(
+  table: string,
+  columns: string,
+  orderColumn: string,
+  filter?: { column: string; value: string },
+) {
+  const admin = createAdminClient();
+  const rows: Row[] = [];
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    let query = admin.from(table)
+      .select(columns)
+      .order(orderColumn, { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (filter) query = query.gte(filter.column, filter.value);
+    const { data, error } = await query;
+    if (error) throw error;
+    rows.push(...((data ?? []) as unknown as Row[]));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows;
+}
+
+function countBy(rows: Row[], column: string) {
+  return rows.reduce<Record<string, number>>((counts, row) => {
+    const value = String(row[column] ?? "unknown");
+    counts[value] = (counts[value] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function percentage(numerator: number, denominator: number) {
+  return denominator > 0 ? Math.round((numerator / denominator) * 100) : 0;
+}
+
+function isoDay(value: unknown) {
+  const timestamp = new Date(String(value));
+  return Number.isNaN(timestamp.getTime()) ? "" : timestamp.toISOString().slice(0, 10);
+}
+
+async function studyAnalytics(counts: Record<Dataset, number>) {
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const firstDay = new Date(today);
+  firstDay.setUTCDate(firstDay.getUTCDate() - 6);
+  const [attempts, pairs, recentMessages, integrity, approvals, proposals] = await Promise.all([
+    allSelectedRows("attempts", "id,stage,started_at,completed_at,pair_session_id", "started_at"),
+    allSelectedRows("pair_sessions", "id,status,paired_at,chat_started_at,approved_at,completed_at,aborted_at", "paired_at"),
+    allSelectedRows("messages", "id,created_at", "created_at", { column: "created_at", value: firstDay.toISOString() }),
+    allSelectedRows("integrity_events", "id,event_type,server_received_at", "id"),
+    allSelectedRows("story_approvals", "proposal_id,attempt_id,decision,decided_at", "decided_at"),
+    allSelectedRows("story_proposals", "id,status,created_at,decided_at", "created_at"),
+  ]);
+  const attemptStages = countBy(attempts, "stage");
+  const pairStatuses = countBy(pairs, "status");
+  const integrityTypes = countBy(integrity, "event_type");
+  const approvalDecisions = countBy(approvals, "decision");
+  const proposalStatuses = countBy(proposals, "status");
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(firstDay);
+    date.setUTCDate(firstDay.getUTCDate() + index);
+    return { date: date.toISOString().slice(0, 10), attempts: 0, messages: 0, integrity: 0 };
+  });
+  const dayByDate = new Map(days.map((day) => [day.date, day]));
+  for (const attempt of attempts) {
+    const bucket = dayByDate.get(isoDay(attempt.started_at));
+    if (bucket) bucket.attempts += 1;
+  }
+  for (const message of recentMessages) {
+    const bucket = dayByDate.get(isoDay(message.created_at));
+    if (bucket) bucket.messages += 1;
+  }
+  for (const incident of integrity) {
+    const bucket = dayByDate.get(isoDay(incident.server_received_at));
+    if (bucket) bucket.integrity += 1;
+  }
+  const pairedAttempts = attempts.filter((attempt) => attempt.pair_session_id).length;
+  const completedAttempts = attemptStages.complete ?? 0;
+  const approvedPairs = pairs.filter((pair) => pair.approved_at).length;
+  const agreementDecisions = approvalDecisions.agree ?? 0;
+  const allDecisions = agreementDecisions + (approvalDecisions.disagree ?? 0);
+  const approvalDurations = pairs.flatMap((pair) => {
+    if (!pair.chat_started_at || !pair.approved_at) return [];
+    const duration = new Date(String(pair.approved_at)).getTime() - new Date(String(pair.chat_started_at)).getTime();
+    return duration >= 0 ? [duration / 60_000] : [];
+  });
+  const averageApprovalMinutes = approvalDurations.length
+    ? Math.round((approvalDurations.reduce((sum, value) => sum + value, 0) / approvalDurations.length) * 10) / 10
+    : 0;
+
+  return {
+    attemptStages,
+    pairStatuses,
+    integrityTypes,
+    approvalDecisions,
+    proposalStatuses,
+    activity: days,
+    kpis: {
+      completionRate: percentage(completedAttempts, counts.attempts),
+      pairingRate: percentage(pairedAttempts, counts.attempts),
+      agreementRate: percentage(agreementDecisions, allDecisions),
+      averageMessagesPerPair: counts.pairs ? Math.round((counts.messages / counts.pairs) * 10) / 10 : 0,
+      averageKeystrokesPerAttempt: counts.attempts ? Math.round(counts.keystrokes / counts.attempts) : 0,
+      integrityPerAttempt: counts.attempts ? Math.round((counts.integrity / counts.attempts) * 10) / 10 : 0,
+      averageApprovalMinutes,
+      completedAttempts,
+      pairedAttempts,
+      approvedPairs,
+    },
+  };
+}
+
 export async function GET(request: NextRequest) {
   try {
     const auth = await requireAdmin(request);
@@ -108,7 +226,8 @@ export async function GET(request: NextRequest) {
     const url = new URL(request.url);
     const requestedDataset = url.searchParams.get("dataset");
     if (requestedDataset === "summary") {
-      return NextResponse.json({ counts: await datasetCounts() }, {
+      const counts = await datasetCounts();
+      return NextResponse.json({ counts, analytics: await studyAnalytics(counts) }, {
         headers: { "Cache-Control": "no-store" },
       });
     }

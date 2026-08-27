@@ -43,10 +43,14 @@ export async function GET(request: NextRequest) {
     });
     const attemptIds = attempts.map((row) => String(row.id));
     const pairIds = [...new Set(attempts.map((row) => row.pair_session_id).filter(Boolean).map(String))];
-    const [pairs, members, messages, proposals, approvals, quizzes, integrity, keystrokes] = await Promise.all([
+    const [pairs, members, messages, ideationDrafts, phaseApprovals, outlineOperations, outlineRevisions, proposals, approvals, quizzes, integrity, keystrokes] = await Promise.all([
       pairIds.length ? allRows("pair_sessions", { column: "id", values: pairIds }) : [],
       pairIds.length ? allRows("pair_members", { column: "pair_session_id", values: pairIds }) : [],
       pairIds.length ? allRows("messages", { column: "pair_session_id", values: pairIds }) : [],
+      attemptIds.length ? allRows("ideation_drafts", { column: "attempt_id", values: attemptIds }) : [],
+      pairIds.length ? allRows("pair_phase_approvals", { column: "pair_session_id", values: pairIds }) : [],
+      pairIds.length ? allRows("outline_operation_batches", { column: "pair_session_id", values: pairIds }) : [],
+      pairIds.length ? allRows("outline_revisions", { column: "pair_session_id", values: pairIds }) : [],
       pairIds.length ? allRows("story_proposals", { column: "pair_session_id", values: pairIds }) : [],
       attemptIds.length ? allRows("story_approvals", { column: "attempt_id", values: attemptIds }) : [],
       attemptIds.length ? allRows("quiz_responses", { column: "attempt_id", values: attemptIds }) : [],
@@ -62,7 +66,13 @@ export async function GET(request: NextRequest) {
 
     const zip = new JSZip();
     const files: Record<string, Row[]> = {
-      attempts, pairs, pair_members: members, messages, story_proposals: proposals,
+      attempts, pairs, pair_members: members, messages, ideation_drafts: ideationDrafts,
+      phase_approvals: phaseApprovals,
+      outline_operation_batches: outlineOperations.map((row) => ({
+        ...row,
+        operations: JSON.stringify(row.operations ?? []),
+      })),
+      outline_revisions: outlineRevisions, story_proposals: proposals,
       story_approvals: approvals, quiz_responses: quizzes, integrity_events: integrity, keystroke_events: keystrokes,
     };
     for (const [name, rows] of Object.entries(files)) {

@@ -8,5 +8,6 @@ test-results/
 .env.local
 .env.*.local
 .runtime/
+supabase/.temp/
 *.log
 .DS_Store

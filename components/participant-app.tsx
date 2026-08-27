@@ -1,20 +1,45 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  AlertTriangle, Check, Clock3, CopyCheck, LockKeyhole, MessageCircle,
-  MonitorCheck, RefreshCw, Send, ShieldCheck, Sparkles, Users,
+  AlertTriangle, Check, Clock3, LockKeyhole,
+  MonitorCheck, RefreshCw, ShieldCheck, Sparkles, Users,
 } from "lucide-react";
 import { Button, Card, ErrorNote, Shell, Spinner } from "@/components/ui";
 import { Markdown } from "@/components/markdown";
-import { LoggedTextarea } from "@/components/logged-textarea";
+import { OnlinePresence } from "@/components/online-presence";
+import { ParticipantTutorial } from "@/components/participant-tutorial";
+import { PageGuide, type PageGuideStep } from "@/components/page-guide";
+import { CollaborationWorkspace } from "@/components/collaboration-workspace";
 import { detectBrowserSupport, type BrowserSupport } from "@/lib/browser";
-import { KeystrokeRecorder } from "@/lib/keystrokes";
-import type { ChatMessage, ParticipantState, StudyConfig } from "@/lib/types";
+import { mergeOutlineBatches } from "@/lib/collaborative-outline";
+import type { ChatMessage, OutlineOperationBatch, ParticipantState, StudyConfig } from "@/lib/types";
 import { apiMessage, camelizeRow, countWords, formatClock, secondsRemaining } from "@/lib/utils";
 import { getBrowserSupabase } from "@/lib/supabase/browser";
 
-type RecorderStatus = "synced" | "syncing" | "offline" | "error";
+const enrollmentGuide: PageGuideStep[] = [
+  { selector: ".hero-copy", title: "Your assessment at a glance", text: "This side summarizes the paired storytelling task and reminds you that your participant ID remains private." },
+  { selector: ".enrollment-card .markdown", title: "Read the consent information", text: "Review the study information before continuing. You can scroll inside this section if the full text is longer." },
+  { selector: ".disclosure", title: "Understand keystroke recording", text: "Typing is recorded only in the chat and final-story fields. Nothing typed in your ID, attention check, quiz, or other websites is captured." },
+  { selector: ".enrollment-card form", title: "Consent and enter your ID", text: "Check the consent box, enter the ID supplied by the researcher, then select Continue." },
+];
+const fullscreenGuide: PageGuideStep[] = [
+  { selector: ".center-card", title: "Enter assessment mode", text: "Select Enter fullscreen to begin. Keep the assessment visible; leaving fullscreen or changing tabs is recorded." },
+  { selector: ".center-card .button", title: "Start when you’re ready", text: "This button requires a direct click because browsers do not allow websites to enter fullscreen automatically." },
+];
+const attentionGuide: PageGuideStep[] = [
+  { selector: ".focus-card h1", title: "Read the sentence prompt", text: "Complete the sentence in your own words. This answer is stored for researcher review but is not automatically scored." },
+  { selector: ".focus-card textarea", title: "Write a short response", text: "Enter at least one word. The live counter keeps the response within the 50-word maximum." },
+  { selector: ".focus-card .button", title: "Continue to matchmaking", text: "When your response is ready, use this button to enter the waiting room." },
+];
+const waitingGuide: PageGuideStep[] = [
+  { selector: ".waiting-card", title: "Stay here while we find a partner", text: "Matchmaking is random and the countdown survives refreshes. If no one is available, you can start another search without repeating earlier steps." },
+];
+const quizGuide: PageGuideStep[] = [
+  { selector: ".quiz-card h1", title: "Complete your individual survey", text: "Your answers are submitted separately and are not shown to your partner." },
+  { selector: ".question-list", title: "Answer every question", text: "Choose one response for each required question. You can change an answer before submitting." },
+  { selector: ".quiz-card > .button", title: "Submit and finish", text: "Once every question has an answer, submit the quiz to complete the assessment and lock your participant ID." },
+];
 
 async function jsonRequest(url: string, init?: RequestInit) {
   const response = await fetch(url, { cache: "no-store", ...init });
@@ -64,6 +89,10 @@ export function ParticipantApp() {
               ...next,
               messages: [...messages.values()].sort((left, right) =>
                 left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)),
+              outlineOperationBatches: mergeOutlineBatches(
+                current.outlineOperationBatches,
+                next.outlineOperationBatches,
+              ),
             };
           });
           setPublicConfig(next.config);
@@ -151,6 +180,31 @@ export function ParticipantApp() {
   }, [attemptId, attemptStage, loadState]);
 
   useEffect(() => {
+    if (!attemptStage || !["instruction", "chat", "finalizing"].includes(attemptStage)) return;
+    const announceDeparture = () => {
+      const body = JSON.stringify({ action: "leavePair" });
+      const queued = navigator.sendBeacon(
+        "/api/participant/action",
+        new Blob([body], { type: "application/json" }),
+      );
+      if (!queued) {
+        void fetch("/api/participant/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        });
+      }
+    };
+    window.addEventListener("pagehide", announceDeparture);
+    window.addEventListener("beforeunload", announceDeparture);
+    return () => {
+      window.removeEventListener("pagehide", announceDeparture);
+      window.removeEventListener("beforeunload", announceDeparture);
+    };
+  }, [attemptStage]);
+
+  useEffect(() => {
     if (!attemptId) return;
     let supabase;
     try { supabase = getBrowserSupabase(); } catch { return; }
@@ -161,8 +215,14 @@ export function ParticipantApp() {
     if (pairId) {
       channels.push(supabase.channel(`pair:${pairId}`, { config: { private: true } })
         .on("broadcast", { event: "state_changed" }, (event: { payload?: unknown }) => {
-          const payload = event.payload as { table?: string } | undefined;
+          const payload = event.payload as { table?: string; batches?: OutlineOperationBatch[] } | undefined;
           if (payload?.table === "messages") void loadRecentMessages(pairId);
+          else if (payload?.table === "outline_operation_batches" && Array.isArray(payload.batches)) {
+            setState((current) => current?.pair?.id === pairId ? {
+              ...current,
+              outlineOperationBatches: mergeOutlineBatches(current.outlineOperationBatches, payload.batches!),
+            } : current);
+          }
           else void loadState(true);
         }).subscribe());
     }
@@ -230,7 +290,7 @@ export function ParticipantApp() {
   }
 
   return (
-    <Shell stage={state.attempt.stage}>
+    <Shell stage={state.attempt.stage} headerExtra={["attention", "waiting"].includes(state.attempt.stage) ? <OnlinePresence /> : undefined}>
       {error && <ErrorNote>{error}</ErrorNote>}
       <Stage
         state={state}
@@ -260,13 +320,14 @@ function Enrollment({ config, onStarted }: { config: StudyConfig; onStarted: () 
     finally { setBusy(false); }
   };
   return (
-    <Shell>
+    <Shell headerExtra={<OnlinePresence />}>
       <div className="hero-grid">
         <div className="hero-copy">
           <span className="eyebrow"><Sparkles size={15} /> Paired storytelling study</span>
           <h1>Create something <em>together.</em></h1>
           <p>You’ll be matched with one participant for a timed, text-based collaboration.</p>
           <div className="trust-row"><ShieldCheck size={18} /><span>Your partner never sees your participant ID.</span></div>
+          <ParticipantTutorial config={config} />
         </div>
         <Card className="enrollment-card">
           <div className="card-kicker">Before you begin</div>
@@ -284,12 +345,13 @@ function Enrollment({ config, onStarted }: { config: StudyConfig; onStarted: () 
           </form>
         </Card>
       </div>
+      <PageGuide tourKey="enrollment" steps={enrollmentGuide} waitForOverview />
     </Shell>
   );
 }
 
 function FullscreenGate({ onEnter, error }: { onEnter: () => void; error: string }) {
-  return <Shell><Card className="center-card"><MonitorCheck className="feature-icon" size={34} /><span className="card-kicker">Assessment mode</span><h1>Enter fullscreen to continue</h1><p>Keep this window visible throughout the task. Leaving fullscreen or changing tabs will be recorded.</p>{error && <ErrorNote>{error}</ErrorNote>}<Button onClick={onEnter}>Enter fullscreen</Button></Card></Shell>;
+  return <Shell headerExtra={<OnlinePresence />}><Card className="center-card"><MonitorCheck className="feature-icon" size={34} /><span className="card-kicker">Assessment mode</span><h1>Enter fullscreen to continue</h1><p>Keep this window visible throughout the task. Leaving fullscreen or changing tabs will be recorded.</p>{error && <ErrorNote>{error}</ErrorNote>}<Button onClick={onEnter}>Enter fullscreen</Button></Card><PageGuide tourKey="fullscreen" steps={fullscreenGuide} /></Shell>;
 }
 
 function Stage({ state, now, refresh, setError }: {
@@ -306,10 +368,10 @@ function Stage({ state, now, refresh, setError }: {
   switch (state.attempt.stage) {
     case "attention": return <Attention prompt={state.config.attentionPrompt} submit={(response) => act({ action: "submitAttention", response })} />;
     case "waiting": return <Waiting queue={state.queue} now={now} retry={() => act({ action: "retryQueue" })} />;
-    case "instruction": return <Instructions state={state} ready={() => act({ action: "ready" })} />;
+    case "instruction":
     case "chat":
-    case "finalizing": return <Chat state={state} now={now} act={act} refresh={refresh} />;
-    case "quiz": return <Quiz state={state} submit={(answers) => act({ action: "submitQuiz", answers })} />;
+    case "finalizing": return <CollaborationWorkspace state={state} now={now} act={act} refresh={refresh} />;
+    case "quiz": return <><Quiz state={state} submit={(answers) => act({ action: "submitQuiz", answers })} /><PageGuide tourKey="quiz" steps={quizGuide} /></>;
     default: return null;
   }
 }
@@ -317,112 +379,20 @@ function Stage({ state, now, refresh, setError }: {
 function Attention({ prompt, submit }: { prompt: string; submit: (response: string) => Promise<void> }) {
   const [value, setValue] = useState(""); const [busy, setBusy] = useState(false);
   const words = countWords(value);
-  return <Card className="focus-card"><span className="step-number">01</span><div className="card-kicker">Quick attention check</div><h1>{prompt}</h1><p>Your response is recorded for researcher review and is not automatically scored.</p><textarea className="large-input" value={value} onChange={(event) => { if (countWords(event.target.value) <= 50) setValue(event.target.value); }} rows={6} autoFocus /><div className={`word-count ${words === 50 ? "limit" : ""}`}>{words} / 50 words</div><Button disabled={!words || busy} onClick={async () => { setBusy(true); try { await submit(value); } catch { /* The parent displays the error. */ } finally { setBusy(false); } }}>{busy ? "Submitting…" : "Enter waiting room"}</Button></Card>;
+  return <><Card className="focus-card"><span className="step-number">01</span><div className="card-kicker">Quick attention check</div><h1>{prompt}</h1><p>Your response is recorded for researcher review and is not automatically scored.</p><textarea className="large-input" value={value} onChange={(event) => { if (countWords(event.target.value) <= 50) setValue(event.target.value); }} rows={6} autoFocus /><div className={`word-count ${words === 50 ? "limit" : ""}`}>{words} / 50 words</div><Button disabled={!words || busy} onClick={async () => { setBusy(true); try { await submit(value); } catch { /* The parent displays the error. */ } finally { setBusy(false); } }}>{busy ? "Submitting…" : "Enter waiting room"}</Button></Card><PageGuide tourKey="attention" steps={attentionGuide} /></>;
 }
 
 function Waiting({ queue, now, retry }: { queue: ParticipantState["queue"]; now: number; retry: () => Promise<void> }) {
   const remaining = secondsRemaining(queue?.expiresAt ?? null, now);
   const expired = !queue || queue.status === "expired" || remaining <= 0;
-  return <Card className="center-card waiting-card"><div className="waiting-orbit"><Users size={30} /><span /><span /></div>{expired ? <><div className="card-kicker">No match found yet</div><h1>Ready to try again?</h1><p>No partner became available during this waiting period. You can immediately start a new five-minute search.</p><Button onClick={() => void retry().catch(() => undefined)}><RefreshCw size={17} /> Try again</Button></> : <><div className="card-kicker">Finding your partner</div><h1>Stay on this page</h1><p>We’re randomly pairing you with another active participant.</p><div className="large-timer"><Clock3 size={20} />{formatClock(remaining)}</div><span className="muted">Time remaining in this search</span></>}</Card>;
-}
-
-function Instructions({ state, ready }: { state: ParticipantState; ready: () => Promise<void> }) {
-  const self = state.pair?.members.find((member) => member.isSelf);
-  const partner = state.pair?.members.find((member) => !member.isSelf);
-  return <div className="split-layout"><Card><span className="card-kicker">You’ve been paired</span><h1>Meet {partner?.alias ?? "your partner"}</h1><Markdown>{state.config.instructionMarkdown}</Markdown><div className="alias-row"><span>You</span><strong>{self?.alias}</strong><span>Partner</span><strong>{partner?.alias}</strong></div></Card><Card className="ready-card"><CopyCheck size={30} /><h2>Read the brief carefully</h2><p>The shared timer begins only when both participants are ready.</p><div className="ready-status"><span className={self?.readyAt ? "ready" : ""}>{self?.readyAt ? <Check size={14} /> : <Clock3 size={14} />} You</span><span className={partner?.readyAt ? "ready" : ""}>{partner?.readyAt ? <Check size={14} /> : <Clock3 size={14} />} {partner?.alias}</span></div><Button disabled={Boolean(self?.readyAt)} onClick={() => void ready().catch(() => undefined)}>{self?.readyAt ? "Waiting for partner…" : "I’m ready"}</Button></Card></div>;
-}
-
-function Chat({ state, now, act, refresh }: {
-  state: ParticipantState; now: number; act: (payload: Record<string, unknown>, refreshAfter?: boolean) => Promise<unknown>; refresh: () => Promise<boolean>;
-}) {
-  const pair = state.pair;
-  const [message, setMessage] = useState("");
-  const [story, setStory] = useState("");
-  const [messageDraftId, setMessageDraftId] = useState(() => crypto.randomUUID());
-  const [storyDraftId, setStoryDraftId] = useState(() => crypto.randomUUID());
-  const [pendingMessages, setPendingMessages] = useState<ChatMessage[]>([]);
-  const [syncStatus, setSyncStatus] = useState<RecorderStatus>("synced");
-  const [submittingStory, setSubmittingStory] = useState(false);
-  const [decidingStory, setDecidingStory] = useState(false);
-  const endRef = useRef<HTMLDivElement | null>(null);
-  const recorder = useMemo(() => new KeystrokeRecorder(state.attempt.id), [state.attempt.id]);
-  const remaining = secondsRemaining(pair?.chatEndsAt ?? null, now);
-  const storyUnlocked = Boolean(pair?.chatEndsAt) && remaining === 0;
-  const partner = pair?.members.find((member) => !member.isSelf);
-  const latestProposal = state.proposal;
-
-  useEffect(() => recorder.subscribe(setSyncStatus), [recorder]);
-  useEffect(() => () => { void recorder.stop(); }, [recorder]);
-  useEffect(() => {
-    const flushWhenHidden = () => { if (document.hidden) void recorder.flush(true); };
-    document.addEventListener("visibilitychange", flushWhenHidden);
-    return () => document.removeEventListener("visibilitychange", flushWhenHidden);
-  }, [recorder]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [pendingMessages, state.messages]);
-  if (!pair) return <Card><ErrorNote>Pair information is unavailable.</ErrorNote></Card>;
-  const context = { recorder, attemptId: state.attempt.id, pairSessionId: pair.id };
-  const visibleMessages = [
-    ...state.messages,
-    ...pendingMessages.filter((pending) => !state.messages.some((item) => item.clientMessageId === pending.clientMessageId)),
-  ].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-  const send = async () => {
-    if (!message.trim()) return;
-    const body = message; const draft = messageDraftId;
-    const clientMessageId = crypto.randomUUID();
-    setPendingMessages((current) => [...current, {
-      id: `pending:${clientMessageId}`,
-      senderAttemptId: state.attempt.id,
-      clientMessageId,
-      fieldInstanceId: draft,
-      body,
-      createdAt: new Date().toISOString(),
-    }]);
-    setMessage(""); setMessageDraftId(crypto.randomUUID());
-    void recorder.flush();
-    try { await act({ action: "message", body, clientMessageId, fieldInstanceId: draft }, false); }
-    catch {
-      setPendingMessages((current) => current.filter((item) => item.id !== `pending:${clientMessageId}`));
-      setMessage(body); setMessageDraftId(draft);
-    }
-  };
-  const propose = async () => {
-    if (!story.trim() || submittingStory) return;
-    setSubmittingStory(true);
-    void recorder.flush();
-    try {
-      await act({ action: "proposeStory", body: story, fieldInstanceId: storyDraftId }, false);
-      setStory(""); setStoryDraftId(crypto.randomUUID());
-      void refresh();
-    } finally {
-      setSubmittingStory(false);
-    }
-  };
-  const decide = async (decision: "agree" | "disagree") => {
-    if (!latestProposal || decidingStory) return;
-    setDecidingStory(true);
-    void recorder.flush();
-    try {
-      await act({ action: "decideStory", proposalId: latestProposal.id, decision }, false);
-      void refresh();
-    } finally {
-      setDecidingStory(false);
-    }
-  };
-
-  return <div className="workspace-grid"><section className="chat-panel"><header className="chat-header"><div><span className="online-dot" /><strong>{partner?.alias ?? "Partner"}</strong><small>Connected to your shared room</small></div><div className={`compact-timer ${storyUnlocked ? "done" : ""}`}><Clock3 size={16} />{storyUnlocked ? "Story unlocked" : formatClock(remaining)}</div></header><div className="messages" aria-live="polite">{visibleMessages.length === 0 && <div className="empty-chat"><MessageCircle size={28} /><p>Start the conversation when you’re ready.</p></div>}{visibleMessages.map((item) => { const mine = item.senderAttemptId === state.attempt.id; return <div key={item.id} className={`message-row ${mine ? "mine" : "theirs"}`}><div className="message-bubble"><span>{item.body}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div></div>; })}<div ref={endRef} /></div><div className="composer"><LoggedTextarea {...context} fieldType="chat" fieldInstanceId={messageDraftId} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={`Message ${partner?.alias ?? "your partner"}`} maxLength={2000} rows={2} /><Button aria-label="Send message" onClick={() => void send()} disabled={!message.trim()}><Send size={18} /></Button><div className={`sync-state ${syncStatus}`}><span />{syncStatus === "synced" ? "Typing data saved" : syncStatus === "syncing" ? "Saving typing data…" : "Typing data will retry"}</div></div></section><aside className="story-panel">{!storyUnlocked ? <><span className="card-kicker">Final story</span><h2>Keep creating</h2><p>The story workspace unlocks when your shared discussion timer reaches zero.</p><div className="story-lock"><LockKeyhole size={25} />{formatClock(remaining)}</div></> : latestProposal?.status === "pending" ? <ProposalCard proposal={latestProposal} state={state} decide={decide} busy={decidingStory} /> : <><span className="card-kicker">Final story</span><h2>{latestProposal?.status === "rejected" ? "Revise the proposal" : "Propose your story"}</h2><p>Either partner can submit. Both of you must approve the exact same version.</p><LoggedTextarea {...context} fieldType="story" fieldInstanceId={storyDraftId} className="story-input" value={story} onChange={(event) => setStory(event.target.value)} placeholder="Write the complete final story here…" rows={14} /><Button disabled={!story.trim() || submittingStory} onClick={() => void propose().catch(() => undefined)}>{submittingStory ? "Submitting…" : "Submit proposal"}</Button></>}</aside></div>;
-}
-
-function ProposalCard({ proposal, state, decide, busy }: { proposal: NonNullable<ParticipantState["proposal"]>; state: ParticipantState; decide: (value: "agree" | "disagree") => Promise<void>; busy: boolean }) {
-  const mine = proposal.approvals.find((approval) => approval.attemptId === state.attempt.id)?.decision;
-  const agrees = proposal.approvals.filter((approval) => approval.decision === "agree").length;
-  return <><span className="card-kicker">Proposal {proposal.version}</span><h2>Review the final story</h2><div className="proposal-text">{proposal.body}</div><div className="approval-count"><span className={agrees >= 1 ? "filled" : ""} /><span className={agrees >= 2 ? "filled" : ""} />{agrees} of 2 approvals</div>{mine ? <p className="decision-note"><Check size={16} /> You selected <strong>{mine}</strong>. Waiting for your partner.</p> : <div className="button-row"><Button className="secondary" disabled={busy} onClick={() => void decide("disagree").catch(() => undefined)}>Disagree</Button><Button disabled={busy} onClick={() => void decide("agree").catch(() => undefined)}>{busy ? "Submitting…" : "Agree with story"}</Button></div>}</>;
+  return <><Card className="center-card waiting-card"><div className="waiting-orbit"><Users size={30} /><span /><span /></div>{expired ? <><div className="card-kicker">No match found yet</div><h1>Ready to try again?</h1><p>No partner became available during this waiting period. You can immediately start a new five-minute search.</p><Button onClick={() => void retry().catch(() => undefined)}><RefreshCw size={17} /> Try again</Button></> : <><div className="card-kicker">Finding your partner</div><h1>Stay on this page</h1><p>We’re randomly pairing you with another active participant.</p><div className="large-timer"><Clock3 size={20} />{formatClock(remaining)}</div><span className="muted">Time remaining in this search</span></>}</Card><PageGuide tourKey="waiting" steps={waitingGuide} /></>;
 }
 
 function Quiz({ state, submit }: { state: ParticipantState; submit: (answers: Record<string, string>) => Promise<void> }) {
   const [answers, setAnswers] = useState<Record<string, string>>(state.quizResponses);
   const [busy, setBusy] = useState(false);
   const complete = state.config.quizQuestions.every((question) => answers[question.id]);
-  return <Card className="quiz-card"><span className="step-number">Final</span><div className="card-kicker">Individual quiz</div><h1>A few final questions</h1><p>Your responses are private from your partner. Select one answer for each question.</p><div className="question-list">{state.config.quizQuestions.map((question, index) => <fieldset key={question.id}><legend><span>{index + 1}</span>{question.prompt}</legend><div className="option-grid">{question.options.map((option) => <label key={option.value} className={answers[question.id] === option.value ? "selected" : ""}><input type="radio" name={question.id} value={option.value} checked={answers[question.id] === option.value} onChange={() => setAnswers((current) => ({ ...current, [question.id]: option.value }))} /><span>{option.label}</span></label>)}</div></fieldset>)}</div><Button disabled={!complete || busy} onClick={async () => { setBusy(true); try { await submit(answers); } finally { setBusy(false); } }}>{busy ? "Submitting…" : "Submit and finish"}</Button></Card>;
+  return <Card className="quiz-card"><span className="step-number">Final</span><div className="card-kicker">Individual survey</div><h1>A few final questions</h1><p>Your responses are private from your partner. Select one answer for each question.</p><div className="question-list">{state.config.quizQuestions.map((question, index) => <fieldset key={question.id}><legend><span>{index + 1}</span>{question.prompt}</legend><div className="option-grid">{question.options.map((option) => <label key={option.value} className={answers[question.id] === option.value ? "selected" : ""}><input type="radio" name={question.id} value={option.value} checked={answers[question.id] === option.value} onChange={() => setAnswers((current) => ({ ...current, [question.id]: option.value }))} /><span>{option.label}</span></label>)}</div></fieldset>)}</div><Button disabled={!complete || busy} onClick={async () => { setBusy(true); try { await submit(answers); } finally { setBusy(false); } }}>{busy ? "Submitting…" : "Submit and finish"}</Button></Card>;
 }
 
 function FullscreenOverlay({ onReturn }: { onReturn: () => void }) {
